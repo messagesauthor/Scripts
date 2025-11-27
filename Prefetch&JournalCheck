@@ -1,0 +1,72 @@
+# Get boot time
+$bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+
+# Check Prefetch
+$prefetchPath = "$env:SystemRoot\Prefetch"
+$prefetchReg = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" -Name "EnablePrefetcher" -ErrorAction SilentlyContinue
+$prefetchEnabled = $prefetchReg -and $prefetchReg.EnablePrefetcher -ne 0
+
+$prefetchModified = $false
+$prefetchDetails = @()
+if (Test-Path $prefetchPath) {
+    $files = Get-ChildItem -Path $prefetchPath -Filter "*.pf" -Force -ErrorAction SilentlyContinue
+    if ($files) {
+        $modifiedFiles = $files | Where-Object { $_.LastWriteTime -gt $bootTime }
+        $newFiles = $files | Where-Object { $_.CreationTime -gt $bootTime }
+        $prefetchModified = ($modifiedFiles.Count -gt 0) -or ($newFiles.Count -gt 0)
+        
+        if ($prefetchModified) {
+            $prefetchDetails = $modifiedFiles | ForEach-Object { 
+                "$($_.Name) modified at $($_.LastWriteTime.ToString('HH:mm:ss'))"
+            }
+            $prefetchDetails += $newFiles | ForEach-Object { 
+                "$($_.Name) created at $($_.CreationTime.ToString('HH:mm:ss'))"
+            }
+        }
+    }
+}
+
+# Check USN Journal
+$usnCleared = $false
+$usnModified = $false
+$usnDetails = @()
+
+try {
+    $usnEvent = Get-WinEvent -LogName "Application" -FilterXPath "*[System[EventID=3079]]" -MaxEvents 1 -ErrorAction SilentlyContinue
+    if ($usnEvent -and $usnEvent.TimeCreated -gt $bootTime) {
+        $usnCleared = $true
+        $usnModified = $true
+        $usnDetails = @("USN Journal cleared at $($usnEvent.TimeCreated.ToString('HH:mm:ss'))")
+    }
+} catch {}
+
+# Display results
+Write-Host "Prefetch"
+Write-Host "Prefetch is $(if ($prefetchEnabled) { 'ON' } else { 'OFF' })"
+Write-Host "Recent modifications $(if ($prefetchModified) { 'YES' } else { 'NO' })"
+Write-Host ""
+Write-Host "Journal"
+Write-Host "Journal was $(if ($usnCleared) { 'cleared' } else { 'not cleared' })"
+Write-Host "Recent modifications: $(if ($usnModified) { 'YES' } else { 'NO' })"
+
+# Create notepad if modifications found
+if ($prefetchModified -or $usnModified) {
+    $reportContent = @()
+    $reportContent += "MODIFICATIONS DETECTED SINCE BOOT ($($bootTime.ToString('yyyy-MM-dd HH:mm:ss')))"
+    $reportContent += ""
+    
+    if ($prefetchModified) {
+        $reportContent += "PREFETCH MODIFICATIONS:"
+        $prefetchDetails | ForEach-Object { $reportContent += "  $_" }
+        $reportContent += ""
+    }
+    
+    if ($usnModified) {
+        $reportContent += "USN JOURNAL MODIFICATIONS:"
+        $usnDetails | ForEach-Object { $reportContent += "  $_" }
+    }
+    
+    $reportPath = "$env:TEMP\Modifications_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    $reportContent | Out-File -FilePath $reportPath -Encoding UTF8
+    Start-Process notepad.exe $reportPath
+}
